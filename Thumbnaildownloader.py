@@ -1,56 +1,57 @@
+import os
+from flask import Flask, request, jsonify
 import yt_dlp
 import requests
 import re
-import json
-import sys
 
-# Default (for testing)
-VIDEO_URL = "https://www.pornhub.com/view_video.php?viewkey=ph62178dca8c65e"
-CHANBOX_URL = "https://chanbox.app/video/sample"
-WEBHOOK_URL = "https://greekgod.app.n8n.cloud/webhook-test/a5c8b1da-8ee5-4929-ac5d-36ca11cebe9a"
+app = Flask(__name__)
 
-# ------------------------------
-# Accept dynamic inputs (from n8n / Google Sheets)
-# sys.argv[1] = VIDEO_URL
-# sys.argv[2] = CHANBOX_URL
-# ------------------------------
-if len(sys.argv) > 1:
-    VIDEO_URL = sys.argv[1]
-if len(sys.argv) > 2:
-    CHANBOX_URL = sys.argv[2]
+# Set this in Replit Secrets as N8N_WEBHOOK_URL
+WEBHOOK_URL = os.environ.get("N8N_WEBHOOK_URL", "")
 
-print("Processing Video URL:", VIDEO_URL)
-print("Chanbox URL:", CHANBOX_URL)
+@app.route("/process", methods=["GET", "POST"])
+def process():
+    # accept JSON body or form/query params
+    if request.is_json:
+        data = request.get_json()
+    else:
+        data = request.values
 
-# Step 1: Extract metadata (including thumbnail)
-ydl_opts = {'skip_download': True}
-with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-    info = ydl.extract_info(VIDEO_URL, download=False)
-    thumbnail_url = info.get('thumbnail')
-    video_title = info.get('title')
-    print("Video Title:", video_title)
-    print("Thumbnail URL:", thumbnail_url)
+    video_url = data.get("video_url")
+    chanbox_url = data.get("chanbox_url")
 
-# Step 2: Sanitize video title for filename
-safe_title = re.sub(r'[\\/*?:"<>|]', "_", video_title)
-output_file = f"{safe_title}.jpg"
+    if not video_url or not chanbox_url:
+        return jsonify({"error": "Provide video_url and chanbox_url"}), 400
 
-# Step 3: Download thumbnail image locally (optional — can be skipped)
-if thumbnail_url:
-    response = requests.get(thumbnail_url)
-    with open(output_file, "wb") as f:
-        f.write(response.content)
-    print("Saved Thumbnail as:", output_file)
+    try:
+        ydl_opts = {'skip_download': True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+        thumbnail_url = info.get('thumbnail')
+        video_title = info.get('title')
+    except Exception as e:
+        return jsonify({"error": "yt-dlp failed", "details": str(e)}), 500
 
-# Step 4: Send data to n8n webhook
-payload = {
-    "video_title": video_title,
-    "thumbnail_url": thumbnail_url,
-    "chanbox_url": CHANBOX_URL
-}
+    payload = {
+        "video_title": video_title,
+        "thumbnail_url": thumbnail_url,
+        "chanbox_url": chanbox_url
+    }
 
-response = requests.post(WEBHOOK_URL, json=payload)
-if response.ok:
-    print("Webhook sent successfully!")
-else:
-    print("Failed to send webhook:", response.text)
+    if not WEBHOOK_URL:
+        # for quick testing, return the payload instead of posting
+        return jsonify({"status": "no_webhook_configured", "payload": payload}), 200
+
+    try:
+        resp = requests.post(WEBHOOK_URL, json=payload, timeout=20)
+        resp.raise_for_status()
+    except Exception as e:
+        return jsonify({"error": "Failed to call n8n webhook", "details": str(e)}), 500
+
+    return jsonify({"status": "ok", "payload": payload}), 200
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 3000))
+    # enable reloader in dev; Replit manages process in production
+    app.run(host="0.0.0.0", port=port)
